@@ -51,6 +51,7 @@ has_mediapipe_solutions = False
 has_mediapipe_tasks = False
 tasks_hand_landmarker = None
 mp_tasks_vision = None
+tasks_init_error = None
 
 # Primary: solutions API
 try:
@@ -65,7 +66,7 @@ try:
 except Exception:
     has_mediapipe_solutions = False
 
-# Fallback: MediaPipe Tasks API (best-effort)
+# Fallback: MediaPipe Tasks API (best-effort, capture init errors)
 try:
     # Try the modern package layout (mediapipe.tasks)
     try:
@@ -91,13 +92,19 @@ try:
         running_mode=RunningMode.VIDEO,
         num_hands=2
     )
-    tasks_hand_landmarker = HandLandmarker.create_from_options(options)
-    has_mediapipe_tasks = True
-except Exception:
+    try:
+        tasks_hand_landmarker = HandLandmarker.create_from_options(options)
+        has_mediapipe_tasks = True
+    except Exception as ti_err:
+        tasks_init_error = repr(ti_err)
+        has_mediapipe_tasks = False
+        tasks_hand_landmarker = None
+except Exception as e:
     # Tasks API not usable or model file not available; we'll handle it at runtime and show instructions to the user.
     has_mediapipe_tasks = False
     tasks_hand_landmarker = None
     mp_tasks_vision = None
+    tasks_init_error = repr(e)
 
 # For wave detection, track wrist positions
 wrist_positions = deque(maxlen=20)
@@ -267,7 +274,16 @@ def run_realtime_detection():
             missing.append("MediaPipe (`mp.solutions` or `mediapipe.tasks`)")
         if not has_cv2:
             missing.append("OpenCV (`cv2`)")
-        st.error(f"Camera translation disabled: missing {', '.join(missing)}. Install required packages (e.g., `pip install mediapipe opencv-python-headless`) or add the MediaPipe Tasks model file `hand_landmarker.task` and try again.")
+
+        msg = f"Camera translation disabled: missing {', '.join(missing)}. "
+        msg += "Install required packages (e.g., `pip install mediapipe opencv-python-headless`) or add the MediaPipe Tasks model file `hand_landmarker.task` and try again."
+        # If Tasks initialization failed with a native binding error, include brief diagnostics
+        if tasks_init_error and not has_mediapipe_solutions:
+            msg += f"\nDebug: MediaPipe Tasks init error: {tasks_init_error}"
+            if st.session_state.get("debug", False):
+                st.write("[DEBUG] Full Tasks init error:", tasks_init_error)
+
+        st.error(msg)
         return
 
     frame_placeholder = st.empty()
