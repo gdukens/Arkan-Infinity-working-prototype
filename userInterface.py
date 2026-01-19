@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from collections import deque
 import toml
+from typing import Any, cast
 
 from groq import Groq
 import groq as groq_module
@@ -40,78 +41,77 @@ st.markdown(
 )
 
 ###############################################################################
-# Mediapipe Setup for Real-Time Gesture Detection (with Letter Detection)
+# MediaPipe Tasks-based Hand Landmarker initialization (preferred)
 ###############################################################################
-# Try to use the classic `solutions` API (some mediapipe releases expose a Tasks-only API instead).
-# If it's not available, we'll attempt to initialize the Tasks-based Hand Landmarker as a fallback.
-mp_hands = None
-hands = None
-mp_drawing = None
-has_mediapipe_solutions = False
 has_mediapipe_tasks = False
 tasks_hand_landmarker = None
 mp_tasks_vision = None
 tasks_init_error = None
-
-# Primary: solutions API — use getattr to avoid static attribute complaints from linters
 try:
-    mp_solutions = getattr(mp, "solutions", None)
+    # Prefer the high-level package layout
+    try:
+        import mediapipe.tasks as tasks_pkg  # type: ignore
+        mp_tasks_vision = getattr(tasks_pkg, 'vision', None)
+        if mp_tasks_vision is None:
+            raise ImportError('mediapipe.tasks.vision not available')
+        HandLandmarker = getattr(mp_tasks_vision, 'HandLandmarker')
+        HandLandmarkerOptions = getattr(mp_tasks_vision, 'HandLandmarkerOptions')
+        BaseOptions = getattr(tasks_pkg, 'BaseOptions')
+        # Running mode enum may be available on vision
+        RunningMode = getattr(mp_tasks_vision, 'RunningMode', None) or getattr(mp_tasks_vision, 'VisionRunningMode', None)
+    except Exception:
+        # Fall back to python package layout
+        from mediapipe.tasks.python import vision as mp_tasks_vision  # type: ignore
+        from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLandmarkerOptions  # type: ignore
+        from mediapipe.tasks.python.core import BaseOptions  # type: ignore
+        try:
+            from mediapipe.tasks.python.vision import vision_task_running_mode as vm  # type: ignore
+            RunningMode = getattr(vm, 'VisionTaskRunningMode', None)
+        except Exception:
+            RunningMode = None
+
+    running_mode_final = None
+    if RunningMode is not None:
+        running_mode_final = getattr(RunningMode, 'VIDEO', None) or getattr(RunningMode, 'IMAGE', None)
+
+    options_kwargs = {
+        'base_options': BaseOptions(model_asset_path='hand_landmarker.task'),
+        'num_hands': 2,
+    }
+    if running_mode_final is not None:
+        options_kwargs['running_mode'] = running_mode_final
+
+    options = HandLandmarkerOptions(**options_kwargs)
+    tasks_hand_landmarker = HandLandmarker.create_from_options(options)
+    has_mediapipe_tasks = True
+except Exception as e:
+    tasks_init_error = repr(e)
+    has_mediapipe_tasks = False
+    tasks_hand_landmarker = None
+
+# Legacy solutions as optional fallback (kept for compatibility)
+has_mediapipe_solutions = False
+try:
+    mp_solutions = getattr(mp, 'solutions', None)
     if mp_solutions is not None:
-        mp_hands_mod = getattr(mp_solutions, "hands", None)
-        if mp_hands_mod is not None:
-            hands = mp_hands_mod.Hands(
+        mp_hands = getattr(mp_solutions, 'hands', None)
+        if mp_hands is not None:
+            hands = mp_hands.Hands(
                 static_image_mode=False,
                 max_num_hands=2,
                 min_detection_confidence=0.5,
             )
-            mp_drawing = getattr(mp_solutions, "drawing_utils", None)
+            mp_drawing = getattr(mp_solutions, 'drawing_utils', None)
             has_mediapipe_solutions = True
         else:
-            has_mediapipe_solutions = False
+            hands = None
+            mp_drawing = None
     else:
-        has_mediapipe_solutions = False
+        hands = None
+        mp_drawing = None
 except Exception:
-    has_mediapipe_solutions = False
-
-# Fallback: MediaPipe Tasks API (best-effort, capture init errors)
-try:
-    # Try the modern package layout (mediapipe.tasks)
-    try:
-        import mediapipe.tasks as tasks_pkg  # type: ignore
-        mp_tasks_vision = getattr(tasks_pkg, 'vision', None)
-        if mp_tasks_vision is not None:
-            HandLandmarker = getattr(mp_tasks_vision, 'HandLandmarker')
-            HandLandmarkerOptions = getattr(mp_tasks_vision, 'HandLandmarkerOptions')
-            BaseOptions = getattr(tasks_pkg, 'BaseOptions')
-            RunningMode = getattr(mp_tasks_vision, 'RunningMode')
-        else:
-            raise ImportError('mediapipe.tasks.vision not available as attribute')
-    except Exception:
-        # Older layout may live under mediapipe.tasks.python
-        from mediapipe.tasks.python import vision as mp_tasks_vision  # type: ignore
-        from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLandmarkerOptions  # type: ignore
-        from mediapipe.tasks.python.core import BaseOptions  # type: ignore
-        RunningMode = mp_tasks_vision.VisionRunningMode
-
-    # Use the packaged task model if present. If the model file is missing this will raise and be handled.
-    options = HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path="hand_landmarker.task"),
-        running_mode=RunningMode.VIDEO,
-        num_hands=2
-    )
-    try:
-        tasks_hand_landmarker = HandLandmarker.create_from_options(options)
-        has_mediapipe_tasks = True
-    except Exception as ti_err:
-        tasks_init_error = repr(ti_err)
-        has_mediapipe_tasks = False
-        tasks_hand_landmarker = None
-except Exception as e:
-    # Tasks API not usable or model file not available; we'll handle it at runtime and show instructions to the user.
-    has_mediapipe_tasks = False
-    tasks_hand_landmarker = None
-    mp_tasks_vision = None
-    tasks_init_error = repr(e)
+    hands = None
+    mp_drawing = None
 
 # For wave detection, track wrist positions
 wrist_positions = deque(maxlen=20)
@@ -275,30 +275,71 @@ def run_realtime_detection():
     and shows the frames in Streamlit.
     Press the 'Stop Gesture Detection' button to end.
     """
-    if not (has_mediapipe_solutions or has_mediapipe_tasks) or not has_cv2:
+    # Require either MediaPipe Tasks (preferred) or Solutions to run real-time detection
+    if not (has_mediapipe_tasks or has_mediapipe_solutions) or not has_cv2:
         missing = []
-        if not (has_mediapipe_solutions or has_mediapipe_tasks):
-            missing.append("MediaPipe (`mp.solutions` or `mediapipe.tasks`)")
+        if not (has_mediapipe_tasks or has_mediapipe_solutions):
+            missing.append("MediaPipe (Tasks or Solutions)")
         if not has_cv2:
             missing.append("OpenCV (`cv2`)")
-
         msg = f"Camera translation disabled: missing {', '.join(missing)}. "
-        msg += "Install required packages (e.g., `pip install mediapipe opencv-python-headless`) or add the MediaPipe Tasks model file `hand_landmarker.task` and try again."
-        # If Tasks initialization failed with a native binding error, include brief diagnostics
-        if tasks_init_error and not has_mediapipe_solutions:
+        if tasks_init_error and not has_mediapipe_tasks:
             msg += f"\nDebug: MediaPipe Tasks init error: {tasks_init_error}"
-            if st.session_state.get("debug", False):
-                st.write("[DEBUG] Full Tasks init error:", tasks_init_error)
-
         st.error(msg)
         return
 
     frame_placeholder = st.empty()
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Could not open webcam. Make sure it's connected and accessible.")
+    # Try to open the webcam using multiple indices and common Windows backends to improve reliability
+    cap = None
+    backend_options = []
+    try:
+        if hasattr(cv2, 'CAP_DSHOW'):
+            backend_options.append(cv2.CAP_DSHOW)
+        if hasattr(cv2, 'CAP_MSMF'):
+            backend_options.append(cv2.CAP_MSMF)
+        if hasattr(cv2, 'CAP_ANY'):
+            backend_options.append(cv2.CAP_ANY)
+    except Exception:
+        backend_options = []
+
+    def try_open(index, backend=None):
+        try:
+            if backend is not None:
+                c = cv2.VideoCapture(index, backend)
+            else:
+                c = cv2.VideoCapture(index)
+            if c.isOpened():
+                return c
+            try:
+                c.release()
+            except Exception:
+                pass
+            return None
+        except Exception:
+            return None
+
+    # Try default first, then backends and indices 0..3
+    cap = try_open(0)
+    if cap is None:
+        for b in backend_options:
+            for i in range(0, 4):
+                cap = try_open(i, b)
+                if cap:
+                    break
+            if cap:
+                break
+
+    if cap is None or not cap.isOpened():
+        st.error("Could not open webcam. Make sure it's connected and accessible. Try granting camera permissions or testing with a different device index.")
         return
+
+    # Try setting a reasonable resolution
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    except Exception:
+        pass
 
     last_gesture = None
     last_gesture_time = 0.0
@@ -323,52 +364,133 @@ def run_realtime_detection():
 
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Try the classic `solutions` processing first; if not available, use the Tasks-based detector.
+        # Prefer Tasks-based detection if available
         results = None
         task_result = None
-        # Prefer solutions API if we have a concrete `hands` instance
-        results = None
-        task_result = None
-        if hands is not None:
+        if has_mediapipe_tasks and tasks_hand_landmarker is not None:
+            try:
+                # Create a MediaPipe Image wrapper from the numpy array
+                try:
+                    from mediapipe.tasks.python.vision.core import image as image_mod
+                    if hasattr(image_mod.Image, 'create_from_array'):
+                        mp_image = image_mod.Image.create_from_array(rgb_frame)
+                    else:
+                        mp_image = image_mod.Image(image_mod.ImageFormat.SRGB, rgb_frame)
+                except Exception:
+                    # Last resort: import module by name
+                    import importlib
+                    image_mod = importlib.import_module('mediapipe.tasks.python.vision.core.image')
+                    mp_image = image_mod.Image(image_mod.ImageFormat.SRGB, rgb_frame)
+
+                timestamp_ms = int(time.time() * 1000)
+                task_result = tasks_hand_landmarker.detect_for_video(mp_image, timestamp_ms)
+                if st.session_state.get('debug', False):
+                    st.write('[DEBUG] Tasks detect_for_video result:', getattr(task_result, 'hand_landmarks', None))
+            except Exception as e:
+                if st.session_state.get('debug', False):
+                    st.write('[DEBUG] Tasks detection error:', e)
+                task_result = None
+        elif has_mediapipe_solutions and hands is not None:
             try:
                 results = hands.process(rgb_frame)
             except Exception:
                 results = None
-        elif has_mediapipe_tasks and tasks_hand_landmarker is not None and mp_tasks_vision is not None:
-            try:
-                # Use attribute access for Image to avoid static lint warnings
-                ImageClass = getattr(mp_tasks_vision, 'Image', None)
-                if ImageClass is not None:
-                    mp_image = ImageClass.create_from_array(rgb_frame)
-                    timestamp_ms = int(time.time() * 1000)
-                    task_result = tasks_hand_landmarker.detect_for_video(mp_image, timestamp_ms)
-                else:
-                    task_result = None
-            except Exception:
-                task_result = None
 
-        # Handle results from mp.solutions
-        if results is not None and getattr(results, 'multi_hand_landmarks', None):
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                    # Safely extract handedness label (some builds expose different shapes)
-                    handedness = "Unknown"
-                    try:
-                        h = results.multi_handedness[idx]
-                        cls = None
+        # Handle results from MediaPipe Tasks first
+        if task_result is not None and getattr(task_result, 'hand_landmarks', None):
+            # Each entry in hand_landmarks is a list of NormalizedLandmark
+            for idx, hand_landmarks_list in enumerate(task_result.hand_landmarks):
+                # Determine handedness if available
+                handedness = 'Unknown'
+                try:
+                    if getattr(task_result, 'handedness', None):
+                        h = task_result.handedness[idx]
                         try:
                             cls = h.classification[0]
-                        except Exception:
-                            cls = getattr(h, 'category_name', None)
-                        if cls is not None:
                             handedness = getattr(cls, 'label', getattr(cls, 'category_name', 'Unknown'))
-                    except Exception:
-                        handedness = "Unknown"
-
-                    if mp_drawing is not None and mp_hands is not None:
-                        try:
-                            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
                         except Exception:
-                            pass
+                            handedness = getattr(h, 'category_name', 'Unknown')
+                except Exception:
+                    handedness = 'Unknown'
+
+                # Draw landmarks from the normalized coordinates (points and connections)
+                try:
+                    for lm in hand_landmarks_list:
+                        x_px = int(lm.x * frame.shape[1])
+                        y_px = int(lm.y * frame.shape[0])
+                        cv2.circle(frame, (x_px, y_px), 3, (0, 255, 0), -1)
+                except Exception:
+                    pass
+
+                # Draw connections between landmarks to form the hand skeleton
+                try:
+                    # Prefer using MediaPipe Solutions HAND_CONNECTIONS if available
+                    connections = None
+                    try:
+                        if 'mp_hands' in globals() and mp_hands is not None:
+                            connections = getattr(mp_hands, 'HAND_CONNECTIONS', None)
+                    except Exception:
+                        connections = None
+
+                    # Fallback connection pairs if HAND_CONNECTIONS not available
+                    if not connections:
+                        connections = [
+                            (0,1),(1,2),(2,3),(3,4),
+                            (0,5),(5,6),(6,7),(7,8),
+                            (5,9),(9,10),(10,11),(11,12),
+                            (9,13),(13,14),(14,15),(15,16),
+                            (13,17),(17,18),(18,19),(19,20),
+                            (0,17)
+                        ]
+
+                    for a, b in connections:
+                        try:
+                            lm_a = hand_landmarks_list[a]
+                            lm_b = hand_landmarks_list[b]
+                            a_px = (int(lm_a.x * frame.shape[1]), int(lm_a.y * frame.shape[0]))
+                            b_px = (int(lm_b.x * frame.shape[1]), int(lm_b.y * frame.shape[0]))
+                            cv2.line(frame, a_px, b_px, (0, 200, 0), 2)
+                        except Exception:
+                            # ignore missing indices or malformed data
+                            continue
+                except Exception:
+                    pass
+
+                # Wrap list into object with `.landmark` to reuse existing recognition logic
+                class _HL:
+                    def __init__(self, lst):
+                        self.landmark = lst
+                wrapped = _HL(hand_landmarks_list)
+
+                try:
+                    gesture = recognize_gesture(wrapped, handedness, sequence_state)
+                except Exception:
+                    gesture = 'Unknown'
+
+                if gesture != 'Unknown':
+                    if gesture != last_gesture:
+                        last_gesture = gesture
+                        last_gesture_time = time.time()
+
+                    if gesture == 'How':
+                        sequence_state = 'How'
+                    elif sequence_state == 'How' and gesture == 'You':
+                        last_gesture = 'How are you?'
+                        last_gesture_time = time.time()
+                        sequence_state = None
+                    elif gesture == 'Hello!':
+                        sequence_state = None
+
+        # Handle results from mp.solutions if available
+        elif results is not None and getattr(results, 'multi_hand_landmarks', None):
+            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                handedness = results.multi_handedness[idx].classification[0].label
+                if mp_drawing is not None and mp_hands is not None:
+                    try:
+                        mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    except Exception:
+                        pass
+
                 gesture = recognize_gesture(hand_landmarks, handedness, sequence_state)
                 if gesture != "Unknown":
                     # If gesture changed, update last_gesture
@@ -377,68 +499,6 @@ def run_realtime_detection():
                         last_gesture_time = time.time()
 
                     # Simple "How are you?" sequence
-                    if gesture == "How":
-                        sequence_state = "How"
-                    elif sequence_state == "How" and gesture == "You":
-                        last_gesture = "How are you?"
-                        last_gesture_time = time.time()
-                        sequence_state = None
-                    elif gesture == "Hello!":
-                        sequence_state = None
-
-        # Handle results from MediaPipe Tasks if available
-        elif task_result is not None and getattr(task_result, 'hand_landmarks', None):
-            for idx, hand_landmarks in enumerate(task_result.hand_landmarks):
-                # Determine handedness if Tasks provides it (safe access)
-                handedness = "Unknown"
-                try:
-                    h = None
-                    if getattr(task_result, 'handedness', None):
-                        try:
-                            h = task_result.handedness[idx]
-                            cls = None
-                            try:
-                                cls = h.classification[0]
-                                handedness = getattr(cls, 'label', getattr(cls, 'category_name', 'Unknown'))
-                            except Exception:
-                                handedness = getattr(h, 'category_name', 'Unknown')
-                        except Exception:
-                            handedness = 'Unknown'
-                except Exception:
-                    handedness = "Unknown"
-
-                # Draw simple landmarks (Tasks may not provide mp_drawing)
-                drawn = False
-                try:
-                    # Tasks may provide hand_landmarks.landmark
-                    for lm in getattr(hand_landmarks, 'landmark', []):
-                        x_px = int(lm.x * frame.shape[1])
-                        y_px = int(lm.y * frame.shape[0])
-                        cv2.circle(frame, (x_px, y_px), 3, (0, 255, 0), -1)
-                    drawn = True
-                except Exception:
-                    drawn = False
-
-                if not drawn:
-                    try:
-                        for lm in hand_landmarks:
-                            x_px = int(lm.x * frame.shape[1])
-                            y_px = int(lm.y * frame.shape[0])
-                            cv2.circle(frame, (x_px, y_px), 3, (0, 255, 0), -1)
-                    except Exception:
-                        pass
-
-                # Reuse the same recognition pipeline (it expects a hand_landmarks-like object)
-                try:
-                    gesture = recognize_gesture(hand_landmarks, handedness, sequence_state)
-                except Exception:
-                    gesture = "Unknown"
-
-                if gesture != "Unknown":
-                    if gesture != last_gesture:
-                        last_gesture = gesture
-                        last_gesture_time = time.time()
-
                     if gesture == "How":
                         sequence_state = "How"
                     elif sequence_state == "How" and gesture == "You":
@@ -462,12 +522,23 @@ def run_realtime_detection():
             )
 
         display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_placeholder.image(display_frame, channels="RGB")
+        try:
+            frame_placeholder.image(display_frame, channels='RGB')
+        except Exception:
+            # Fallback to PIL image display if direct numpy array fails
+            try:
+                pil_img = Image.fromarray(display_frame)
+                frame_placeholder.image(pil_img, use_column_width=False)
+            except Exception:
+                # If display fails, silently continue; user will see an error message elsewhere
+                pass
         time.sleep(0.03)
 
     cap.release()
     st.session_state["stop_detection"] = False
     st.write("Real-time gesture detection stopped.")
+
+
 
 ###############################################################################
 # 1) BSL “Simplification” with Groq
@@ -664,11 +735,26 @@ def main():
     api_key = os.getenv("GROQ_API_KEY")
 
     # If running in Streamlit Cloud or with a local secrets file, prefer st.secrets
-    if not api_key and hasattr(st, 'secrets'):
-        # Common key names used by users
-        api_key = st.secrets.get("GROQ_API_KEY") or st.secrets.get("groq_api_key") or st.secrets.get("GROQ") or st.secrets.get("groq")
-        if api_key and st.session_state.get("debug", False):
-            st.write("[DEBUG] Using Groq key from Streamlit secrets.")
+    if not api_key:
+        try:
+            # Accessing st.secrets may raise StreamlitSecretNotFoundError when no secrets file exists.
+            api_key = st.secrets.get("GROQ_API_KEY") or st.secrets.get("groq_api_key") or st.secrets.get("GROQ") or st.secrets.get("groq")
+            if api_key and st.session_state.get("debug", False):
+                st.write("[DEBUG] Using Groq key from Streamlit secrets.")
+        except Exception as e:
+            # Streamlit raises StreamlitSecretNotFoundError when no secrets are present; ignore that case in normal runs.
+            try:
+                from streamlit.runtime.secrets import StreamlitSecretNotFoundError
+                if isinstance(e, StreamlitSecretNotFoundError):
+                    if st.session_state.get("debug", False):
+                        st.write("[DEBUG] No Streamlit secrets file found.")
+                else:
+                    if st.session_state.get("debug", False):
+                        import traceback
+                        st.write(traceback.format_exc())
+            except Exception:
+                if st.session_state.get("debug", False):
+                    st.write("[DEBUG] Error reading st.secrets:", e)
 
     if not api_key:
         try:

@@ -5,7 +5,7 @@
   "created_at": "2026-01-19",
   "entrypoint": "userInterface.py",
   "start_command": "& \".\\.venv\\Scripts\\python.exe\" -m streamlit run userInterface.py",
-  "install_command": "python -m venv .venv && & \".\\.venv\\Scripts\\Activate.ps1\" && pip install -r requirements.txt",
+  "install_command": "python -m venv .venv && .venv\\Scripts\\Activate.ps1 && pip install -r requirements.txt",
   "python": ">=3.9",
   "ports": [8501],
   "env": {
@@ -25,7 +25,7 @@
     "expected_status": 200
   },
   "run_instructions": [
-    "Create and activate a virtual environment: python -m venv .venv && & '.\\.venv\\Scripts\\Activate.ps1'",
+    "Create and activate a virtual environment: python -m venv .venv; .venv\\Scripts\\Activate.ps1",
     "Install dependencies: pip install -r requirements.txt or pip install streamlit opencv-python mediapipe groq pillow requests numpy",
     "Configure Groq API key: add config.toml with [api]\nkey = \"your_groq_api_key_here\" OR set env var GROQ_API_KEY",
     "Start the app: & '.\\.venv\\Scripts\\python.exe' -m streamlit run userInterface.py",

@@ -1,2 +1,4 @@
 config.toml
 run.json
+# Local Streamlit secrets (do NOT commit)
+.streamlit/secrets.toml
