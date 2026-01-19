@@ -18,6 +18,7 @@ from collections import deque
 import toml
 
 from groq import Groq
+import groq as groq_module
 
 # Set page configuration at the very top.
 st.set_page_config(page_title="BSL Video Carousel", layout="wide")
@@ -66,14 +67,28 @@ except Exception:
 
 # Fallback: MediaPipe Tasks API (best-effort)
 try:
-    from mediapipe.tasks.python import vision as mp_tasks_vision  # type: ignore
-    from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLandmarkerOptions  # type: ignore
-    from mediapipe.tasks.python.core import BaseOptions, VisionRunningMode  # type: ignore
+    # Try the modern package layout (mediapipe.tasks)
+    try:
+        import mediapipe.tasks as tasks_pkg  # type: ignore
+        mp_tasks_vision = getattr(tasks_pkg, 'vision', None)
+        if mp_tasks_vision is not None:
+            HandLandmarker = getattr(mp_tasks_vision, 'HandLandmarker')
+            HandLandmarkerOptions = getattr(mp_tasks_vision, 'HandLandmarkerOptions')
+            BaseOptions = getattr(tasks_pkg, 'BaseOptions')
+            RunningMode = getattr(mp_tasks_vision, 'RunningMode')
+        else:
+            raise ImportError('mediapipe.tasks.vision not available as attribute')
+    except Exception:
+        # Older layout may live under mediapipe.tasks.python
+        from mediapipe.tasks.python import vision as mp_tasks_vision  # type: ignore
+        from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLandmarkerOptions  # type: ignore
+        from mediapipe.tasks.python.core import BaseOptions  # type: ignore
+        RunningMode = mp_tasks_vision.VisionRunningMode
 
     # Use the packaged task model if present. If the model file is missing this will raise and be handled.
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path="hand_landmarker.task"),
-        running_mode=VisionRunningMode.VIDEO,
+        running_mode=RunningMode.VIDEO,
         num_hands=2
     )
     tasks_hand_landmarker = HandLandmarker.create_from_options(options)
@@ -433,24 +448,34 @@ Now convert this sentence:
     if st.session_state.get("debug", False):
         st.write("[DEBUG] BSL Simplify Prompt:", prompt)
 
-    client_response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",  # Use your preferred Groq text model
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that converts English sentences into BSL-friendly keywords."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,
-        max_completion_tokens=128,
-        top_p=1,
-        stop=None,
-        stream=False
-    )
-    simplified_text = client_response.choices[0].message.content.strip()
-    if st.session_state.get("debug", False):
-        st.write("[DEBUG] Groq returned simplified text:", simplified_text)
+    try:
+        client_response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",  # Use your preferred Groq text model
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that converts English sentences into BSL-friendly keywords."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_completion_tokens=128,
+            top_p=1,
+            stop=None,
+            stream=False
+        )
+        simplified_text = client_response.choices[0].message.content.strip()
+        if st.session_state.get("debug", False):
+            st.write("[DEBUG] Groq returned simplified text:", simplified_text)
 
-    keywords = [w.strip().lower() for w in re.split(r"[,\n]+", simplified_text) if w.strip()]
-    return keywords[:max_keywords]
+        keywords = [w.strip().lower() for w in re.split(r"[,\n]+", simplified_text) if w.strip()]
+        return keywords[:max_keywords]
+    except groq_module.AuthenticationError:
+        st.error("Groq authentication failed: invalid API key. Please set a valid `GROQ_API_KEY` in your environment or deployment secrets.")
+        return []
+    except Exception as e:
+        st.error(f"Groq API error: {e}")
+        if st.session_state.get("debug", False):
+            import traceback
+            st.write(traceback.format_exc())
+        return []
 
 ###############################################################################
 # 2) signbsl.com Lookup
@@ -481,23 +506,33 @@ def get_bsl_alternatives_from_groq(client, original_word, max_alternatives=5):
     )
     if st.session_state.get("debug", False):
         st.write(f"[DEBUG] Asking for synonyms of '{original_word}' from Groq...")
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.7,
-        max_completion_tokens=256,
-        top_p=1,
-        stop=None,
-        stream=False
-    )
-    text_out = response.choices[0].message.content.strip()
-    synonyms = [w.strip().lower() for w in re.split(r"[,\n]+", text_out) if w.strip()]
-    if st.session_state.get("debug", False):
-        st.write(f"[DEBUG] Synonyms for '{original_word}':", synonyms)
-    return synonyms[:max_alternatives]
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_completion_tokens=256,
+            top_p=1,
+            stop=None,
+            stream=False
+        )
+        text_out = response.choices[0].message.content.strip()
+        synonyms = [w.strip().lower() for w in re.split(r"[,\n]+", text_out) if w.strip()]
+        if st.session_state.get("debug", False):
+            st.write(f"[DEBUG] Synonyms for '{original_word}':", synonyms)
+        return synonyms[:max_alternatives]
+    except groq_module.AuthenticationError:
+        st.error("Groq authentication failed: invalid API key. Please set a valid `GROQ_API_KEY` in your environment or deployment secrets.")
+        return []
+    except Exception as e:
+        st.error(f"Groq API error: {e}")
+        if st.session_state.get("debug", False):
+            import traceback
+            st.write(traceback.format_exc())
+        return []
 
 ###############################################################################
 # 4) Process English Text into BSL Video Items
@@ -575,8 +610,16 @@ def main():
     if "debug" not in st.session_state:
         st.session_state["debug"] = False
 
-    # Get Groq API key from environment first, then fallback to config.toml
+    # Get Groq API key from environment, then Streamlit secrets, then fallback to config.toml
     api_key = os.getenv("GROQ_API_KEY")
+
+    # If running in Streamlit Cloud or with a local secrets file, prefer st.secrets
+    if not api_key and hasattr(st, 'secrets'):
+        # Common key names used by users
+        api_key = st.secrets.get("GROQ_API_KEY") or st.secrets.get("groq_api_key") or st.secrets.get("GROQ") or st.secrets.get("groq")
+        if api_key and st.session_state.get("debug", False):
+            st.write("[DEBUG] Using Groq key from Streamlit secrets.")
+
     if not api_key:
         try:
             with open("config.toml", "r") as config_file:
