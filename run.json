@@ -5,7 +5,7 @@
   "created_at": "2026-01-19",
   "entrypoint": "userInterface.py",
   "start_command": "& \".\\.venv\\Scripts\\python.exe\" -m streamlit run userInterface.py",
-  "install_command": "python -m venv .venv && & ".\\.venv\\Scripts\\Activate.ps1" && pip install -r requirements.txt",
+  "install_command": "python -m venv .venv && & \".\\.venv\\Scripts\\Activate.ps1\" && pip install -r requirements.txt",
   "python": ">=3.9",
   "ports": [8501],
   "env": {

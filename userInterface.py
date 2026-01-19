@@ -53,16 +53,23 @@ tasks_hand_landmarker = None
 mp_tasks_vision = None
 tasks_init_error = None
 
-# Primary: solutions API
+# Primary: solutions API — use getattr to avoid static attribute complaints from linters
 try:
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5
-    )
-    mp_drawing = mp.solutions.drawing_utils
-    has_mediapipe_solutions = True
+    mp_solutions = getattr(mp, "solutions", None)
+    if mp_solutions is not None:
+        mp_hands_mod = getattr(mp_solutions, "hands", None)
+        if mp_hands_mod is not None:
+            hands = mp_hands_mod.Hands(
+                static_image_mode=False,
+                max_num_hands=2,
+                min_detection_confidence=0.5,
+            )
+            mp_drawing = getattr(mp_solutions, "drawing_utils", None)
+            has_mediapipe_solutions = True
+        else:
+            has_mediapipe_solutions = False
+    else:
+        has_mediapipe_solutions = False
 except Exception:
     has_mediapipe_solutions = False
 
@@ -319,30 +326,49 @@ def run_realtime_detection():
         # Try the classic `solutions` processing first; if not available, use the Tasks-based detector.
         results = None
         task_result = None
-        if has_mediapipe_solutions:
+        # Prefer solutions API if we have a concrete `hands` instance
+        results = None
+        task_result = None
+        if hands is not None:
             try:
                 results = hands.process(rgb_frame)
             except Exception:
                 results = None
         elif has_mediapipe_tasks and tasks_hand_landmarker is not None and mp_tasks_vision is not None:
             try:
-                # Build a Tasks Image and call the video detection API (timestamp in ms)
-                mp_image = mp_tasks_vision.Image.create_from_array(rgb_frame)
-                timestamp_ms = int(time.time() * 1000)
-                task_result = tasks_hand_landmarker.detect_for_video(mp_image, timestamp_ms)
+                # Use attribute access for Image to avoid static lint warnings
+                ImageClass = getattr(mp_tasks_vision, 'Image', None)
+                if ImageClass is not None:
+                    mp_image = ImageClass.create_from_array(rgb_frame)
+                    timestamp_ms = int(time.time() * 1000)
+                    task_result = tasks_hand_landmarker.detect_for_video(mp_image, timestamp_ms)
+                else:
+                    task_result = None
             except Exception:
                 task_result = None
 
         # Handle results from mp.solutions
         if results is not None and getattr(results, 'multi_hand_landmarks', None):
             for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                handedness = results.multi_handedness[idx].classification[0].label
-                if mp_drawing and mp_hands:
+                    # Safely extract handedness label (some builds expose different shapes)
+                    handedness = "Unknown"
                     try:
-                        mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                        h = results.multi_handedness[idx]
+                        cls = None
+                        try:
+                            cls = h.classification[0]
+                        except Exception:
+                            cls = getattr(h, 'category_name', None)
+                        if cls is not None:
+                            handedness = getattr(cls, 'label', getattr(cls, 'category_name', 'Unknown'))
                     except Exception:
-                        pass
+                        handedness = "Unknown"
 
+                    if mp_drawing is not None and mp_hands is not None:
+                        try:
+                            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                        except Exception:
+                            pass
                 gesture = recognize_gesture(hand_landmarks, handedness, sequence_state)
                 if gesture != "Unknown":
                     # If gesture changed, update last_gesture
@@ -363,27 +389,37 @@ def run_realtime_detection():
         # Handle results from MediaPipe Tasks if available
         elif task_result is not None and getattr(task_result, 'hand_landmarks', None):
             for idx, hand_landmarks in enumerate(task_result.hand_landmarks):
-                # Determine handedness if Tasks provides it
+                # Determine handedness if Tasks provides it (safe access)
                 handedness = "Unknown"
                 try:
-                    # Some Task results expose category_name on handedness
-                    if hasattr(task_result, 'handedness') and task_result.handedness:
-                        # Try to mimic solutions format
+                    h = None
+                    if getattr(task_result, 'handedness', None):
                         try:
-                            handedness = task_result.handedness[idx].classification[0].label
+                            h = task_result.handedness[idx]
+                            cls = None
+                            try:
+                                cls = h.classification[0]
+                                handedness = getattr(cls, 'label', getattr(cls, 'category_name', 'Unknown'))
+                            except Exception:
+                                handedness = getattr(h, 'category_name', 'Unknown')
                         except Exception:
-                            handedness = getattr(task_result.handedness[idx], 'category_name', 'Unknown')
+                            handedness = 'Unknown'
                 except Exception:
                     handedness = "Unknown"
 
                 # Draw simple landmarks (Tasks may not provide mp_drawing)
+                drawn = False
                 try:
-                    for lm in hand_landmarks.landmark:
+                    # Tasks may provide hand_landmarks.landmark
+                    for lm in getattr(hand_landmarks, 'landmark', []):
                         x_px = int(lm.x * frame.shape[1])
                         y_px = int(lm.y * frame.shape[0])
                         cv2.circle(frame, (x_px, y_px), 3, (0, 255, 0), -1)
+                    drawn = True
                 except Exception:
-                    # Fallback: iterate if it's a plain sequence of points
+                    drawn = False
+
+                if not drawn:
                     try:
                         for lm in hand_landmarks:
                             x_px = int(lm.x * frame.shape[1])
@@ -594,20 +630,25 @@ def next_word_and_rerun():
         idx = st.session_state.get("bsl_index", 0)
         if idx < len(st.session_state["bsl_videos"]) - 1:
             st.session_state["bsl_index"] = idx + 1
-    try:
-        st.experimental_rerun()
-    except Exception:
-        pass
+    # Call the best available rerun function (supports multiple Streamlit versions)
+    rerun_fn = getattr(st, 'experimental_rerun', None) or getattr(st, 'rerun', None)
+    if callable(rerun_fn):
+        try:
+            rerun_fn()
+        except Exception:
+            pass
 
 def prev_word_and_rerun():
     if "bsl_videos" in st.session_state and st.session_state["bsl_videos"]:
         idx = st.session_state.get("bsl_index", 0)
         if idx > 0:
             st.session_state["bsl_index"] = idx - 1
-    try:
-        st.experimental_rerun()
-    except Exception:
-        pass
+    rerun_fn = getattr(st, 'experimental_rerun', None) or getattr(st, 'rerun', None)
+    if callable(rerun_fn):
+        try:
+            rerun_fn()
+        except Exception:
+            pass
 
 ###############################################################################
 # 6) Main Streamlit App
