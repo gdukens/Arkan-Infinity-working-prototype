@@ -596,15 +596,8 @@ def prev_word_and_rerun():
 ###############################################################################
 # 6) Main Streamlit App
 ###############################################################################
-def handle_text_change():
-    user_text = st.session_state["user_text"].strip()
-    if user_text:
-        with st.spinner("Processing text..."):
-            videos = process_text_bsl(client=None, text=user_text)  # Replace `client=None` with the actual client if needed
-        st.session_state["bsl_videos"] = videos
-        st.session_state["bsl_index"] = 0
-        st.success("Generated BSL video items.")
-        
+# Note: `handle_text_change` was removed because the main UI now calls `process_text_bsl(client, user_text)`
+# directly from the Text Translation page, ensuring a valid Groq `client` is used.        
 def main():
     # Set debug flag in session state (default off)
     if "debug" not in st.session_state:
