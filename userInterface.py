@@ -5,7 +5,12 @@ import requests
 import re
 import io
 import uuid
-import cv2
+has_cv2 = False
+try:
+    import cv2
+    has_cv2 = True
+except Exception:
+    has_cv2 = False
 import mediapipe as mp
 import numpy as np
 from PIL import Image
