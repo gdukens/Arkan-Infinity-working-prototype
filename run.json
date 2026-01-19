@@ -1,0 +1,36 @@
+{
+  "name": "Arkan Infinity - Working Prototype",
+  "version": "0.1.0",
+  "description": "Runtime metadata and run instructions for the Arkan Infinity Streamlit prototype.",
+  "created_at": "2026-01-19",
+  "entrypoint": "userInterface.py",
+  "start_command": "& \".\\.venv\\Scripts\\python.exe\" -m streamlit run userInterface.py",
+  "install_command": "python -m venv .venv && & ".\\.venv\\Scripts\\Activate.ps1" && pip install -r requirements.txt",
+  "python": ">=3.9",
+  "ports": [8501],
+  "env": {
+    "GROQ_API_KEY": "YOUR_GROQ_API_KEY"
+  },
+  "files": [
+    "userInterface.py",
+    "config.toml",
+    "readme.md",
+    "logo.png",
+    "requirements.txt"
+  ],
+  "dependencies": ["streamlit", "opencv-python", "mediapipe", "groq", "pillow", "requests", "numpy"],
+  "healthcheck": {
+    "url": "http://localhost:8501",
+    "path": "/",
+    "expected_status": 200
+  },
+  "run_instructions": [
+    "Create and activate a virtual environment: python -m venv .venv && & '.\\.venv\\Scripts\\Activate.ps1'",
+    "Install dependencies: pip install -r requirements.txt or pip install streamlit opencv-python mediapipe groq pillow requests numpy",
+    "Configure Groq API key: add config.toml with [api]\nkey = \"your_groq_api_key_here\" OR set env var GROQ_API_KEY",
+    "Start the app: & '.\\.venv\\Scripts\\python.exe' -m streamlit run userInterface.py",
+    "Open browser at the URL printed by Streamlit (e.g., http://localhost:8501)"
+  ],
+  "notes": "If your installed MediaPipe variant does not expose mp.solutions, the Camera Translation feature will show a message and be disabled until MediaPipe is switched or the app is adapted to use MediaPipe Tasks. Keep config.toml in .gitignore to avoid committing secrets.",
+  "maintainer": "GitHub Copilot"
+}
