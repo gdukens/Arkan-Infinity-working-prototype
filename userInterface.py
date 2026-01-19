@@ -42,11 +42,16 @@ st.markdown(
 # Mediapipe Setup for Real-Time Gesture Detection (with Letter Detection)
 ###############################################################################
 # Try to use the classic `solutions` API (some mediapipe releases expose a Tasks-only API instead).
-# If it's not available, we'll disable camera translation gracefully.
+# If it's not available, we'll attempt to initialize the Tasks-based Hand Landmarker as a fallback.
 mp_hands = None
 hands = None
 mp_drawing = None
 has_mediapipe_solutions = False
+has_mediapipe_tasks = False
+tasks_hand_landmarker = None
+mp_tasks_vision = None
+
+# Primary: solutions API
 try:
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
@@ -57,9 +62,27 @@ try:
     mp_drawing = mp.solutions.drawing_utils
     has_mediapipe_solutions = True
 except Exception:
-    # The installed MediaPipe package does not expose `mp.solutions` (e.g., Tasks-only build).
-    # We'll keep the variables None and handle this case at runtime.
     has_mediapipe_solutions = False
+
+# Fallback: MediaPipe Tasks API (best-effort)
+try:
+    from mediapipe.tasks.python import vision as mp_tasks_vision  # type: ignore
+    from mediapipe.tasks.python.vision.hand_landmarker import HandLandmarker, HandLandmarkerOptions  # type: ignore
+    from mediapipe.tasks.python.core import BaseOptions, VisionRunningMode  # type: ignore
+
+    # Use the packaged task model if present. If the model file is missing this will raise and be handled.
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path="hand_landmarker.task"),
+        running_mode=VisionRunningMode.VIDEO,
+        num_hands=2
+    )
+    tasks_hand_landmarker = HandLandmarker.create_from_options(options)
+    has_mediapipe_tasks = True
+except Exception:
+    # Tasks API not usable or model file not available; we'll handle it at runtime and show instructions to the user.
+    has_mediapipe_tasks = False
+    tasks_hand_landmarker = None
+    mp_tasks_vision = None
 
 # For wave detection, track wrist positions
 wrist_positions = deque(maxlen=20)
@@ -223,13 +246,13 @@ def run_realtime_detection():
     and shows the frames in Streamlit.
     Press the 'Stop Gesture Detection' button to end.
     """
-    if not has_mediapipe_solutions or not has_cv2:
+    if not (has_mediapipe_solutions or has_mediapipe_tasks) or not has_cv2:
         missing = []
-        if not has_mediapipe_solutions:
-            missing.append("MediaPipe (`mp.solutions`)")
+        if not (has_mediapipe_solutions or has_mediapipe_tasks):
+            missing.append("MediaPipe (`mp.solutions` or `mediapipe.tasks`)")
         if not has_cv2:
             missing.append("OpenCV (`cv2`)")
-        st.error(f"Camera translation disabled: missing {', '.join(missing)}. Install required packages (e.g., `pip install mediapipe opencv-python-headless`) or update the app to use MediaPipe Tasks.")
+        st.error(f"Camera translation disabled: missing {', '.join(missing)}. Install required packages (e.g., `pip install mediapipe opencv-python-headless`) or add the MediaPipe Tasks model file `hand_landmarker.task` and try again.")
         return
 
     frame_placeholder = st.empty()
@@ -261,12 +284,33 @@ def run_realtime_detection():
             break
 
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb_frame)
 
-        if results.multi_hand_landmarks:
+        # Try the classic `solutions` processing first; if not available, use the Tasks-based detector.
+        results = None
+        task_result = None
+        if has_mediapipe_solutions:
+            try:
+                results = hands.process(rgb_frame)
+            except Exception:
+                results = None
+        elif has_mediapipe_tasks and tasks_hand_landmarker is not None and mp_tasks_vision is not None:
+            try:
+                # Build a Tasks Image and call the video detection API (timestamp in ms)
+                mp_image = mp_tasks_vision.Image.create_from_array(rgb_frame)
+                timestamp_ms = int(time.time() * 1000)
+                task_result = tasks_hand_landmarker.detect_for_video(mp_image, timestamp_ms)
+            except Exception:
+                task_result = None
+
+        # Handle results from mp.solutions
+        if results is not None and getattr(results, 'multi_hand_landmarks', None):
             for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 handedness = results.multi_handedness[idx].classification[0].label
-                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                if mp_drawing and mp_hands:
+                    try:
+                        mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    except Exception:
+                        pass
 
                 gesture = recognize_gesture(hand_landmarks, handedness, sequence_state)
                 if gesture != "Unknown":
@@ -276,6 +320,58 @@ def run_realtime_detection():
                         last_gesture_time = time.time()
 
                     # Simple "How are you?" sequence
+                    if gesture == "How":
+                        sequence_state = "How"
+                    elif sequence_state == "How" and gesture == "You":
+                        last_gesture = "How are you?"
+                        last_gesture_time = time.time()
+                        sequence_state = None
+                    elif gesture == "Hello!":
+                        sequence_state = None
+
+        # Handle results from MediaPipe Tasks if available
+        elif task_result is not None and getattr(task_result, 'hand_landmarks', None):
+            for idx, hand_landmarks in enumerate(task_result.hand_landmarks):
+                # Determine handedness if Tasks provides it
+                handedness = "Unknown"
+                try:
+                    # Some Task results expose category_name on handedness
+                    if hasattr(task_result, 'handedness') and task_result.handedness:
+                        # Try to mimic solutions format
+                        try:
+                            handedness = task_result.handedness[idx].classification[0].label
+                        except Exception:
+                            handedness = getattr(task_result.handedness[idx], 'category_name', 'Unknown')
+                except Exception:
+                    handedness = "Unknown"
+
+                # Draw simple landmarks (Tasks may not provide mp_drawing)
+                try:
+                    for lm in hand_landmarks.landmark:
+                        x_px = int(lm.x * frame.shape[1])
+                        y_px = int(lm.y * frame.shape[0])
+                        cv2.circle(frame, (x_px, y_px), 3, (0, 255, 0), -1)
+                except Exception:
+                    # Fallback: iterate if it's a plain sequence of points
+                    try:
+                        for lm in hand_landmarks:
+                            x_px = int(lm.x * frame.shape[1])
+                            y_px = int(lm.y * frame.shape[0])
+                            cv2.circle(frame, (x_px, y_px), 3, (0, 255, 0), -1)
+                    except Exception:
+                        pass
+
+                # Reuse the same recognition pipeline (it expects a hand_landmarks-like object)
+                try:
+                    gesture = recognize_gesture(hand_landmarks, handedness, sequence_state)
+                except Exception:
+                    gesture = "Unknown"
+
+                if gesture != "Unknown":
+                    if gesture != last_gesture:
+                        last_gesture = gesture
+                        last_gesture_time = time.time()
+
                     if gesture == "How":
                         sequence_state = "How"
                     elif sequence_state == "How" and gesture == "You":
